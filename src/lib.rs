@@ -1,13 +1,25 @@
+#![warn(missing_docs)]
+//! Combinators for Futures
+//!
+//! This provides a way to compose `Future`s before calling `.await`.
+
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::future::Future;
 
+/// This is basically [`Result`], but less judgemental.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Either<A, B> {
+    /// One side
     Left(A),
+    /// The other side
     Right(B),
 }
 
+/// Execute two futures and return the result of the future that finishes first. The other future
+/// is dropped.
+///
+/// The result of `.await` is `Either<A, B>`
 pub fn race<F, G, A, B>(a: F, b: G) -> Race<A, B>
 where
     F: Future<Output = A>,
@@ -21,8 +33,11 @@ where
     }
 }
 
+/// Encapsulates racing futures
 pub struct Race<A, B> {
+    #[doc(hidden)]
     a: Pin<Box<dyn Future<Output = A>>>,
+    #[doc(hidden)]
     b: Pin<Box<dyn Future<Output = B>>>,
 }
 
@@ -31,15 +46,19 @@ impl<A, B> Future for Race<A, B> {
 
     fn poll(mut self: Pin<&mut Race<A, B>>, ctx: &mut Context) -> Poll<Either<A, B>> {
         match self.a.as_mut().poll(ctx) {
-            Poll::Ready(r) => Poll::Ready(Either::Left(r)), // need to cancel `b`
+            Poll::Ready(r) => Poll::Ready(Either::Left(r)),
             Poll::Pending => match self.b.as_mut().poll(ctx) {
-                Poll::Ready(r) => Poll::Ready(Either::Right(r)), // need to cancel `a`
+                Poll::Ready(r) => Poll::Ready(Either::Right(r)),
                 Poll::Pending => Poll::Pending,
             },
         }
     }
 }
 
+/// Execute two futures and return the pair of their results. Will not return until both futures
+/// are complete.
+///
+/// The result of `.await` is `(A, B)`
 pub fn join<F, G, A, B>(a: F, b: G) -> Join<A, B>
 where
     F: Future<Output = A>,
@@ -55,6 +74,7 @@ where
     }
 }
 
+/// Encapsulates the joining of futures.
 pub struct Join<A, B> {
     a: Pin<Box<dyn Future<Output = A>>>,
     b: Pin<Box<dyn Future<Output = B>>>,
@@ -94,6 +114,10 @@ impl<A, B> Future for Join<A, B> {
     }
 }
 
+/// Executes a future that returns a result. If if returns `Err`, then the second future is
+/// executed. If it returns `Ok`, the second future is never run.
+///
+/// The result of `.await` is `(Option<E>, A)`.
 pub fn on_error<F, G, A, E>(f: F, e: G) -> OnError<A, E>
 where
     F: Future<Output = Result<A, E>>,
@@ -108,6 +132,7 @@ where
     }
 }
 
+/// Encapsulates a future and an option on-error.
 pub struct OnError<A, E> {
     f: Pin<Box<dyn Future<Output = Result<A, E>>>>,
     e: Pin<Box<dyn Future<Output = A>>>,
@@ -119,7 +144,7 @@ impl<A, E> Future for OnError<A, E> {
     fn poll(mut self: Pin<&mut OnError<A, E>>, ctx: &mut Context) -> Poll<(Option<E>, A)> {
         if self.err.is_none() {
             match self.f.as_mut().poll(ctx) {
-                Poll::Ready(Ok(a)) => Poll::Ready((None, a)), // need to cancel `e`
+                Poll::Ready(Ok(a)) => Poll::Ready((None, a)),
                 Poll::Ready(Err(e)) => {
                     self.err = Box::new(Some(e));
                     match self.e.as_mut().poll(ctx) {
