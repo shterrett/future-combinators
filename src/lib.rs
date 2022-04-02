@@ -253,6 +253,63 @@ where
     }
 }
 
+/// Traverse a vector of futures.
+///
+/// Given `Vec<Future<Output = A>>`, calling `.await` returns `Vec<A>`
+/// Order and length of the original vector is preserved.
+pub fn traverse_vec<F, A>(fs: Vec<F>) -> TraverseV<F, A>
+where
+    F: Future<Output = A>,
+    F: 'static,
+{
+    TraverseV {
+        futures: fs
+            .into_iter()
+            .map(|f| (Box::pin(f), Box::new(None)))
+            .collect(),
+    }
+}
+
+/// Encapsulates traversing a vector of futures
+pub struct TraverseV<F, A>
+where
+    F: Future<Output = A>,
+{
+    futures: Vec<(Pin<Box<F>>, Box<Option<A>>)>,
+}
+
+impl<F, A> Future for TraverseV<F, A>
+where
+    F: Future<Output = A>,
+{
+    type Output = Vec<A>;
+    fn poll(mut self: Pin<&mut TraverseV<F, A>>, ctx: &mut Context) -> Poll<Vec<A>> {
+        for (future, result) in self.as_mut().futures.iter_mut() {
+            match result.as_mut() {
+                None => {
+                    if let Poll::Ready(a) = future.as_mut().poll(ctx) {
+                        result.replace(a);
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        let done = self.futures.iter().all(|(_, o)| o.is_some());
+        if done {
+            Poll::Ready(
+                self.as_mut()
+                    .futures
+                    .iter_mut()
+                    // checked that all are `Some` in `done`
+                    .map(|(_, o)| o.take().unwrap())
+                    .collect(),
+            )
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     extern crate async_std;
@@ -334,5 +391,14 @@ mod test {
         let at = and_then(successful(), from_result);
         let result = at.await;
         assert_eq!(result, 1);
+    }
+
+    #[async_std::test]
+    async fn test_traverse_vec() {
+        let vals = vec![1, 3, 2, 4];
+        let fs = vals.clone().into_iter().map(timed_return).collect();
+        let f = traverse_vec(fs);
+        let results = f.await;
+        assert_eq!(results, vals);
     }
 }
