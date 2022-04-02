@@ -20,7 +20,7 @@ pub enum Either<A, B> {
 /// is dropped.
 ///
 /// The result of `.await` is `Either<A, B>`
-pub fn race<F, G, A, B>(a: F, b: G) -> Race<A, B>
+pub fn race<F, G, A, B>(a: F, b: G) -> Race<F, A, G, B>
 where
     F: Future<Output = A>,
     F: 'static,
@@ -34,17 +34,25 @@ where
 }
 
 /// Encapsulates racing futures
-pub struct Race<A, B> {
+pub struct Race<F, A, G, B>
+where
+    F: Future<Output = A>,
+    G: Future<Output = B>,
+{
     #[doc(hidden)]
-    a: Pin<Box<dyn Future<Output = A>>>,
+    a: Pin<Box<F>>,
     #[doc(hidden)]
-    b: Pin<Box<dyn Future<Output = B>>>,
+    b: Pin<Box<G>>,
 }
 
-impl<A, B> Future for Race<A, B> {
+impl<F, A, G, B> Future for Race<F, A, G, B>
+where
+    F: Future<Output = A>,
+    G: Future<Output = B>,
+{
     type Output = Either<A, B>;
 
-    fn poll(mut self: Pin<&mut Race<A, B>>, ctx: &mut Context) -> Poll<Either<A, B>> {
+    fn poll(mut self: Pin<&mut Race<F, A, G, B>>, ctx: &mut Context) -> Poll<Either<A, B>> {
         match self.a.as_mut().poll(ctx) {
             Poll::Ready(r) => Poll::Ready(Either::Left(r)),
             Poll::Pending => match self.b.as_mut().poll(ctx) {
@@ -59,7 +67,7 @@ impl<A, B> Future for Race<A, B> {
 /// are complete.
 ///
 /// The result of `.await` is `(A, B)`
-pub fn join<F, G, A, B>(a: F, b: G) -> Join<A, B>
+pub fn join<F, A, G, B>(a: F, b: G) -> Join<F, A, G, B>
 where
     F: Future<Output = A>,
     F: 'static,
@@ -75,16 +83,24 @@ where
 }
 
 /// Encapsulates the joining of futures.
-pub struct Join<A, B> {
-    a: Pin<Box<dyn Future<Output = A>>>,
-    b: Pin<Box<dyn Future<Output = B>>>,
+pub struct Join<F, A, G, B>
+where
+    F: Future<Output = A>,
+    G: Future<Output = B>,
+{
+    a: Pin<Box<F>>,
+    b: Pin<Box<G>>,
     r_a: Box<Option<A>>,
     r_b: Box<Option<B>>,
 }
 
-impl<A, B> Future for Join<A, B> {
+impl<F, A, G, B> Future for Join<F, A, G, B>
+where
+    F: Future<Output = A>,
+    G: Future<Output = B>,
+{
     type Output = (A, B);
-    fn poll(mut self: Pin<&mut Join<A, B>>, ctx: &mut Context) -> Poll<(A, B)> {
+    fn poll(mut self: Pin<&mut Join<F, A, G, B>>, ctx: &mut Context) -> Poll<(A, B)> {
         let mut m_a = self.r_a.take();
         let mut m_b = self.r_b.take();
         if m_a.is_none() {
@@ -118,7 +134,7 @@ impl<A, B> Future for Join<A, B> {
 /// executed. If it returns `Ok`, the second future is never run.
 ///
 /// The result of `.await` is `(Option<E>, A)`.
-pub fn on_error<F, G, A, E>(f: F, e: G) -> OnError<A, E>
+pub fn on_error<F, A, G, E>(f: F, e: G) -> OnError<F, A, G, E>
 where
     F: Future<Output = Result<A, E>>,
     F: 'static,
@@ -133,15 +149,23 @@ where
 }
 
 /// Encapsulates a future and an option on-error.
-pub struct OnError<A, E> {
-    f: Pin<Box<dyn Future<Output = Result<A, E>>>>,
-    e: Pin<Box<dyn Future<Output = A>>>,
+pub struct OnError<F, A, G, E>
+where
+    F: Future<Output = Result<A, E>>,
+    G: Future<Output = A>,
+{
+    f: Pin<Box<F>>,
+    e: Pin<Box<G>>,
     err: Box<Option<E>>,
 }
 
-impl<A, E> Future for OnError<A, E> {
+impl<F, A, G, E> Future for OnError<F, A, G, E>
+where
+    F: Future<Output = Result<A, E>>,
+    G: Future<Output = A>,
+{
     type Output = (Option<E>, A);
-    fn poll(mut self: Pin<&mut OnError<A, E>>, ctx: &mut Context) -> Poll<(Option<E>, A)> {
+    fn poll(mut self: Pin<&mut OnError<F, A, G, E>>, ctx: &mut Context) -> Poll<(Option<E>, A)> {
         if self.err.is_none() {
             match self.f.as_mut().poll(ctx) {
                 Poll::Ready(Ok(a)) => Poll::Ready((None, a)),
@@ -166,7 +190,7 @@ impl<A, E> Future for OnError<A, E> {
 /// Maps a function over the result of a future
 ///
 /// Given a `Future<A>` and a `Fn<A> -> B`, the result of `.await` is `B`.
-pub fn map<F, A, G, B>(future: F, f: G) -> Map<A, B, G>
+pub fn map<F, A, B, G>(future: F, f: G) -> Map<F, A, B, G>
 where
     F: Future<Output = A>,
     F: 'static,
@@ -179,20 +203,22 @@ where
 }
 
 /// Encapsulates mapping over a future
-pub struct Map<A, B, F>
+pub struct Map<F, A, B, G>
 where
-    F: Fn(A) -> B,
+    F: Future<Output = A>,
+    G: Fn(A) -> B,
 {
-    future: Pin<Box<dyn Future<Output = A>>>,
-    f: Box<F>,
+    future: Pin<Box<F>>,
+    f: Box<G>,
 }
 
-impl<A, B, F> Future for Map<A, B, F>
+impl<F, A, B, G> Future for Map<F, A, B, G>
 where
-    F: Fn(A) -> B,
+    F: Future<Output = A>,
+    G: Fn(A) -> B,
 {
     type Output = B;
-    fn poll(mut self: Pin<&mut Map<A, B, F>>, ctx: &mut Context) -> Poll<B> {
+    fn poll(mut self: Pin<&mut Map<F, A, B, G>>, ctx: &mut Context) -> Poll<B> {
         match self.future.as_mut().poll(ctx) {
             Poll::Ready(a) => Poll::Ready((self.f)(a)),
             Poll::Pending => Poll::Pending,
@@ -205,13 +231,11 @@ where
 ///
 /// For `Future<Output = A>` and a `Fn(A) -> Future<Output = B>`,
 /// the result of calling `.await` is `B`
-pub fn and_then<A, B, F, G, H>(fut: H, f: F) -> AndThen<A, B, F, G>
+pub fn and_then<F, A, B, G, H>(fut: F, f: G) -> AndThen<F, A, B, G, H>
 where
-    F: Fn(A) -> G,
-    G: Future<Output = B>,
-    G: 'static,
-    H: Future<Output = A>,
-    H: 'static,
+    F: Future<Output = A>,
+    G: Fn(A) -> H,
+    H: Future<Output = B>,
 {
     AndThen {
         future: Box::pin(fut),
@@ -221,24 +245,26 @@ where
 }
 
 /// Encapsulates a monadic bind for futures
-pub struct AndThen<A, B, F, G>
+pub struct AndThen<F, A, B, G, H>
 where
-    F: Fn(A) -> G,
-    G: Future<Output = B>,
+    F: Future<Output = A>,
+    G: Fn(A) -> H,
+    H: Future<Output = B>,
 {
-    future: Pin<Box<dyn Future<Output = A>>>,
-    f: Box<F>,
-    and_then: Option<Pin<Box<dyn Future<Output = B>>>>,
+    future: Pin<Box<F>>,
+    f: Box<G>,
+    and_then: Option<Pin<Box<H>>>,
 }
 
-impl<A, B, F, G> Future for AndThen<A, B, F, G>
+impl<F, A, B, G, H> Future for AndThen<F, A, B, G, H>
 where
-    F: Fn(A) -> G,
-    G: Future<Output = B>,
-    G: 'static,
+    F: Future<Output = A>,
+    G: Fn(A) -> H,
+    H: Future<Output = B>,
+    H: 'static,
 {
     type Output = B;
-    fn poll(mut self: Pin<&mut AndThen<A, B, F, G>>, ctx: &mut Context) -> Poll<B> {
+    fn poll(mut self: Pin<&mut AndThen<F, A, B, G, H>>, ctx: &mut Context) -> Poll<B> {
         match self.and_then.take() {
             Some(mut at) => at.as_mut().poll(ctx),
             None => match self.future.as_mut().poll(ctx) {
