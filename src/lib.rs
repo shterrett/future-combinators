@@ -163,6 +163,96 @@ impl<A, E> Future for OnError<A, E> {
     }
 }
 
+/// Maps a function over the result of a future
+///
+/// Given a `Future<A>` and a `Fn<A> -> B`, the result of `.await` is `B`.
+pub fn map<F, A, G, B>(future: F, f: G) -> Map<A, B, G>
+where
+    F: Future<Output = A>,
+    F: 'static,
+    G: Fn(A) -> B,
+{
+    Map {
+        future: Box::pin(future),
+        f: Box::new(f),
+    }
+}
+
+/// Encapsulates mapping over a future
+pub struct Map<A, B, F>
+where
+    F: Fn(A) -> B,
+{
+    future: Pin<Box<dyn Future<Output = A>>>,
+    f: Box<F>,
+}
+
+impl<A, B, F> Future for Map<A, B, F>
+where
+    F: Fn(A) -> B,
+{
+    type Output = B;
+    fn poll(mut self: Pin<&mut Map<A, B, F>>, ctx: &mut Context) -> Poll<B> {
+        match self.future.as_mut().poll(ctx) {
+            Poll::Ready(a) => Poll::Ready((self.f)(a)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Runs a function that returns a future over the result of a future
+/// i.e. `future >>= function`
+///
+/// For `Future<Output = A>` and a `Fn(A) -> Future<Output = B>`,
+/// the result of calling `.await` is `B`
+pub fn and_then<A, B, F, G, H>(fut: H, f: F) -> AndThen<A, B, F, G>
+where
+    F: Fn(A) -> G,
+    G: Future<Output = B>,
+    G: 'static,
+    H: Future<Output = A>,
+    H: 'static,
+{
+    AndThen {
+        future: Box::pin(fut),
+        f: Box::new(f),
+        and_then: None,
+    }
+}
+
+/// Encapsulates a monadic bind for futures
+pub struct AndThen<A, B, F, G>
+where
+    F: Fn(A) -> G,
+    G: Future<Output = B>,
+{
+    future: Pin<Box<dyn Future<Output = A>>>,
+    f: Box<F>,
+    and_then: Option<Pin<Box<dyn Future<Output = B>>>>,
+}
+
+impl<A, B, F, G> Future for AndThen<A, B, F, G>
+where
+    F: Fn(A) -> G,
+    G: Future<Output = B>,
+    G: 'static,
+{
+    type Output = B;
+    fn poll(mut self: Pin<&mut AndThen<A, B, F, G>>, ctx: &mut Context) -> Poll<B> {
+        match self.and_then.take() {
+            Some(mut at) => at.as_mut().poll(ctx),
+            None => match self.future.as_mut().poll(ctx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(a) => {
+                    let f_b = Box::pin((self.f)(a));
+                    self.and_then.replace(f_b);
+                    self.and_then.as_mut().unwrap().as_mut().poll(ctx)
+                }
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     extern crate async_std;
@@ -223,5 +313,26 @@ mod test {
         let on_e = on_error(failure(), on_err());
         let result = on_e.await;
         assert_eq!(result, (Some(3), 2));
+    }
+
+    #[async_std::test]
+    async fn test_map() {
+        let f = map(on_err(), |a| a + 1);
+        let result = f.await;
+        assert_eq!(result, 3);
+    }
+
+    async fn from_result(r: Result<usize, usize>) -> usize {
+        match r {
+            Ok(x) => x,
+            Err(y) => y,
+        }
+    }
+
+    #[async_std::test]
+    async fn test_and_then() {
+        let at = and_then(successful(), from_result);
+        let result = at.await;
+        assert_eq!(result, 1);
     }
 }
