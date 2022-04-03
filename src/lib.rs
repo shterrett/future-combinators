@@ -219,10 +219,7 @@ where
 {
     type Output = B;
     fn poll(mut self: Pin<&mut Map<F, A, B, G>>, ctx: &mut Context) -> Poll<B> {
-        match self.future.as_mut().poll(ctx) {
-            Poll::Ready(a) => Poll::Ready((self.f)(a)),
-            Poll::Pending => Poll::Pending,
-        }
+        self.future.as_mut().poll(ctx).map(self.f.as_ref())
     }
 }
 
@@ -336,6 +333,83 @@ where
     }
 }
 
+/// Traverse a `Result` containing a `Future` in `Ok`
+///
+/// Given a `Result<Future<Output = A>, E>`, calling `.await` produces `Result<A, E>`
+pub fn traverse_result<F, A, E>(r: Result<F, E>) -> TraverseR<F, A, E>
+where
+    F: Future<Output = A>,
+{
+    match r {
+        Err(e) => TraverseR {
+            future: None,
+            error: Box::new(Some(e)),
+        },
+        Ok(f) => TraverseR {
+            future: Some(Box::pin(f)),
+            error: Box::new(None),
+        },
+    }
+}
+
+/// Encapsulates traversing a `Future` over a `Result`
+pub struct TraverseR<F, A, E>
+where
+    F: Future<Output = A>,
+{
+    future: Option<Pin<Box<F>>>,
+    error: Box<Option<E>>,
+}
+impl<F, A, E> Future for TraverseR<F, A, E>
+where
+    F: Future<Output = A>,
+{
+    type Output = Result<A, E>;
+    fn poll(mut self: Pin<&mut TraverseR<F, A, E>>, ctx: &mut Context) -> Poll<Result<A, E>> {
+        // Using two options and `is_some` are uncomfortable contortions to work around the fact
+        // that in the `Err` case, the value needs to be moved out and returned, but in the `Ok`
+        // case, the future needs to be mutably borrowed and `poll`-ed.
+        match (self.error.is_some(), self.future.is_some()) {
+            (true, false) => Poll::Ready(Err(self.error.take().unwrap())),
+            (false, true) => self.future.as_mut().unwrap().as_mut().poll(ctx).map(Ok),
+            _ => panic!("Invariant violated: TraverseR should  have exactly one Some"),
+        }
+    }
+}
+
+/// Traverse a `Future` over an `Option`
+///
+/// Given `Option<Future<Output = A>>`, the result of `.await` is `Option<A>`
+pub fn traverse_option<F, A>(o: Option<F>) -> TraverseO<F, A>
+where
+    F: Future<Output = A>,
+{
+    TraverseO {
+        future: o.map(Box::pin),
+    }
+}
+
+/// Encapsulates traversing a `Future` over `Option`
+pub struct TraverseO<F, A>
+where
+    F: Future<Output = A>,
+{
+    future: Option<Pin<Box<F>>>,
+}
+
+impl<F, A> Future for TraverseO<F, A>
+where
+    F: Future<Output = A>,
+{
+    type Output = Option<A>;
+    fn poll(mut self: Pin<&mut TraverseO<F, A>>, ctx: &mut Context) -> Poll<Option<A>> {
+        match self.future.as_mut() {
+            None => Poll::Ready(None),
+            Some(f) => f.as_mut().poll(ctx).map(Some),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     extern crate async_std;
@@ -426,5 +500,37 @@ mod test {
         let f = traverse_vec(fs);
         let results = f.await;
         assert_eq!(results, vals);
+    }
+
+    #[async_std::test]
+    async fn test_traverse_result_ok() {
+        let r: Result<u64, u64> = Ok(1);
+        let f = traverse_result(r.map(timed_return));
+        let x = f.await;
+        assert_eq!(x, Ok(1));
+    }
+
+    #[async_std::test]
+    async fn test_traverse_result_err() {
+        let r: Result<u64, u64> = Err(1);
+        let f = traverse_result(r.map(timed_return));
+        let x = f.await;
+        assert_eq!(x, Err(1));
+    }
+
+    #[async_std::test]
+    async fn test_traverse_option_some() {
+        let r: Option<u64> = Some(1);
+        let f = traverse_option(r.map(timed_return));
+        let x = f.await;
+        assert_eq!(x, Some(1));
+    }
+
+    #[async_std::test]
+    async fn test_traverse_option_none() {
+        let r: Option<u64> = None;
+        let f = traverse_option(r.map(timed_return));
+        let x = f.await;
+        assert_eq!(x, None);
     }
 }
